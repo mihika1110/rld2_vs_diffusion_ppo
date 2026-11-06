@@ -1,14 +1,3 @@
-"""
-Main Training and Experiment Orchestrator for MEC Multi-Agent Offloading.
-Comprehensively trains and compares:
-1. Independent Categorical PPO Baseline
-2. Discrete Diffusion PPO (Nelson Sir's Formulation)
-3. RL-D^2 with Reverse-KL (RKL) and Auto-tuned Lambda (Ma et al. 2026)
-4. RL-D^2 with Forward-KL (FKL) Weighted ELBO (Ma et al. 2026)
-5. Non-learning Benchmarks: Random and Instantaneous Greedy
-With Top-p (nucleus) inference sampling (App. C.3) and multi-scale scalability analysis.
-"""
-
 import os
 import time
 import argparse
@@ -16,8 +5,8 @@ from typing import Dict, List, Tuple, Any, Optional
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
 import torch
+import functools
 
 from mec_env import MECEnv
 from ppo_baseline import CategoricalPPOAgent
@@ -25,7 +14,7 @@ from ppo_diffusion import DiscreteDiffusionPPOAgent
 from rl_d2_rkl import RLD2RKLAgent
 from rl_d2_fkl import RLD2FKLAgent
 from evaluate import evaluate_policy, print_evaluation_summary
-import functools
+
 print = functools.partial(print, flush=True)
 
 
@@ -39,17 +28,16 @@ def train_single_agent(
     n_users: int = 4,
     n_stations: int = 2,
     seed: int = 42,
-    total_epochs: int = 8,
-    rollout_steps: int = 512,
-    diffusion_timesteps: int = 4,
+    total_epochs: int = 10,
+    rollout_steps: int = 1024,
+    diffusion_timesteps: int = 32,
     device: str = "cpu",
 ) -> Tuple[Any, List[Dict[str, Any]]]:
-    """
-    Trains a single agent and returns (agent, training_history).
-    """
+
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+    #creates a mec environment 
     env = MECEnv(n_stations=n_stations, n_users=n_users, seed=seed)
 
     if algo_name == "ppo_baseline":
@@ -68,9 +56,12 @@ def train_single_agent(
             device=device,
         )
     elif algo_name == "rl_d2_fkl":
+        total_samples = total_epochs * rollout_steps
+        fkl_buffer_size = max(64, int(0.05 * total_samples))  # 5% of total samples
         agent = RLD2FKLAgent(
             env=env,
             num_timesteps=diffusion_timesteps,
+            replay_buffer_size=fkl_buffer_size,
             auto_tune_temp=True,
             device=device,
         )
@@ -81,18 +72,30 @@ def train_single_agent(
     print(f"\n--- Training {algo_name} | Users={n_users} | Seed={seed} ---")
     start_time = time.time()
 
+    best_reward = -float("inf")
+    best_actor_state = None
+    best_critic_state = None
+    best_epoch = 1
+
     for epoch in range(1, total_epochs + 1):
         t0 = time.time()
         metrics = agent.train_epoch(rollout_steps=rollout_steps)
         elapsed = time.time() - t0
 
         metrics["epoch"] = epoch
-        metrics["total_steps"] = epoch * rollout_steps
+        metrics["total_steps"] = epoch*rollout_steps
         metrics["algo"] = algo_name
         metrics["n_users"] = n_users
         metrics["seed"] = seed
         metrics["epoch_time_s"] = elapsed
         history.append(metrics)
+
+        # Track best performing epoch by mean_reward
+        if metrics["mean_reward"] > best_reward:
+            best_reward = metrics["mean_reward"]
+            best_epoch = epoch
+            best_actor_state = {k: v.cpu().clone() for k, v in agent.actor.state_dict().items()}
+            best_critic_state = {k: v.cpu().clone() for k, v in agent.critic.state_dict().items()}
 
         temp_str = f" | Temp: {metrics['temperature']:.3f}" if "temperature" in metrics else ""
         print(
@@ -107,29 +110,33 @@ def train_single_agent(
     total_time = time.time() - start_time
     print(f"Finished {algo_name} in {total_time:.1f}s")
 
-    # Save checkpoint
+    # Restore best checkpoint weights to agent for evaluation and saving
+    if best_actor_state is not None:
+        agent.actor.load_state_dict(best_actor_state)
+        agent.critic.load_state_dict(best_critic_state)
+
+    #save best checkpoint
     save_path = f"checkpoints/{algo_name}_u{n_users}_s{seed}.pt"
     checkpoint = {
         "algo": algo_name,
         "n_users": n_users,
         "n_stations": n_stations,
+        "best_epoch": best_epoch,
+        "best_reward": best_reward,
         "actor_state_dict": agent.actor.state_dict(),
         "critic_state_dict": agent.critic.state_dict(),
     }
     torch.save(checkpoint, save_path)
-    print(f"Saved weights to {save_path}")
+    print(f"Saved best weights (from Epoch {best_epoch}, Reward: {best_reward:.3f}) to {save_path}")
 
     return agent, history
 
 
 def plot_comparison_results(df_history: pd.DataFrame, df_eval: pd.DataFrame, n_users: int):
-    """
-    Generates rich publication-quality plots comparing all methods.
-    """
     plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
     fig, axes = plt.subplots(1, 3, figsize=(19, 5.2))
 
-    # 1. Training Reward Curves
+    # 1.training reward curves
     ax = axes[0]
     algos = df_history["algo"].unique()
     colors = {
@@ -160,35 +167,48 @@ def plot_comparison_results(df_history: pd.DataFrame, df_eval: pd.DataFrame, n_u
     ax.set_ylabel("Reward (Negative Cost)", fontsize=11)
     ax.legend(frameon=True, loc="lower right", fontsize=9)
 
-    # 2. Evaluation Mean Cost Comparison
+    # 2.evaluation mean cost comparison
     ax = axes[1]
     policy_order = ["random", "greedy", "ppo_baseline", "diffusion_ppo", "rl_d2_rkl", "rl_d2_fkl"]
     eval_sub = df_eval[df_eval["policy"].isin(policy_order)].copy()
-    grouped_eval = eval_sub.groupby("policy")["mean_cost"].agg(["mean", "std"]).reindex(policy_order).dropna()
+    grouped_eval = eval_sub.groupby("policy")["mean_cost"].agg(["mean", "std"]).reindex(policy_order)
+    grouped_eval["std"] = grouped_eval["std"].fillna(0.0)
+    grouped_eval = grouped_eval.dropna(subset=["mean"])
 
-    bar_labels = [
-        "Random",
-        "Greedy",
-        "Categorical\nPPO",
-        "Discrete\nDiffusion PPO",
-        "RL-D²\n(RKL)",
-        "RL-D²\n(FKL)",
-    ]
-    bar_colors = ["#7f7f7f", "#bcbd22", "#1f77b4", "#2ca02c", "#ff7f0e", "#9467bd"]
+    bar_label_map = {
+        "random": "Random",
+        "greedy": "Greedy",
+        "ppo_baseline": "Categorical\nPPO",
+        "diffusion_ppo": "Discrete\nDiffusion PPO",
+        "rl_d2_rkl": "RL-D²\n(RKL)",
+        "rl_d2_fkl": "RL-D²\n(FKL)",
+    }
+    bar_color_map = {
+        "random": "#7f7f7f",
+        "greedy": "#bcbd22",
+        "ppo_baseline": "#1f77b4",
+        "diffusion_ppo": "#2ca02c",
+        "rl_d2_rkl": "#ff7f0e",
+        "rl_d2_fkl": "#9467bd",
+    }
 
+    current_policies = list(grouped_eval.index)
+    current_labels = [bar_label_map.get(p, p) for p in current_policies]
+    current_colors = [bar_color_map.get(p, "#333333") for p in current_policies]
     x_pos = np.arange(len(grouped_eval))
+
     bars = ax.bar(
         x_pos,
         grouped_eval["mean"].values,
         yerr=grouped_eval["std"].values,
         capsize=5,
-        color=bar_colors[:len(grouped_eval)],
+        color=current_colors,
         edgecolor="black",
         linewidth=0.8,
         alpha=0.85,
     )
     ax.set_xticks(x_pos)
-    ax.set_xticklabels(bar_labels[:len(grouped_eval)], fontsize=9)
+    ax.set_xticklabels(current_labels, fontsize=9)
     ax.set_title(f"Evaluation Cost Comparison (Lower is Better)", fontsize=13, fontweight="bold")
     ax.set_ylabel("Weighted Cost (Latency + Energy)", fontsize=11)
 
@@ -205,15 +225,22 @@ def plot_comparison_results(df_history: pd.DataFrame, df_eval: pd.DataFrame, n_u
             fontweight="bold",
         )
 
-    # 3. Latency vs Energy Trade-off
+    # 3.latency vs energy trade-off
     ax = axes[2]
-    grouped_latency = eval_sub.groupby("policy")[["mean_latency_s", "mean_energy_j"]].mean().reindex(policy_order).dropna()
-    for i, pol in enumerate(grouped_latency.index):
+    grouped_latency = (
+        eval_sub.groupby("policy")[["mean_latency_s", "mean_energy_j"]]
+        .mean()
+        .reindex(policy_order)
+        .dropna(subset=["mean_latency_s", "mean_energy_j"])
+    )
+    for pol in grouped_latency.index:
         lat = grouped_latency.loc[pol, "mean_latency_s"]
         en = grouped_latency.loc[pol, "mean_energy_j"]
-        ax.scatter(lat, en, color=bar_colors[i], s=140, edgecolors="black", zorder=4)
+        color = bar_color_map.get(pol, "#333333")
+        label = bar_label_map.get(pol, pol).replace("\n", " ")
+        ax.scatter(lat, en, color=color, s=140, edgecolors="black", zorder=4)
         ax.annotate(
-            bar_labels[i].replace("\n", " "),
+            label,
             xy=(lat, en),
             xytext=(6, 4),
             textcoords="offset points",
@@ -233,9 +260,6 @@ def plot_comparison_results(df_history: pd.DataFrame, df_eval: pd.DataFrame, n_u
 
 
 def plot_scalability_analysis(df_eval: pd.DataFrame):
-    """
-    Plots performance metrics and decision latency as a function of the number of users M.
-    """
     unique_users = sorted(df_eval["n_users"].unique())
     if len(unique_users) < 2:
         return
@@ -261,7 +285,7 @@ def plot_scalability_analysis(df_eval: pd.DataFrame):
         "rl_d2_fkl": "RL-D² (FKL)",
     }
 
-    # 1. Cost vs Number of Users
+    # 1.cost vs number of users
     ax = axes[0]
     for pol in policies:
         sub = df_eval[df_eval["policy"] == pol]
@@ -275,7 +299,7 @@ def plot_scalability_analysis(df_eval: pd.DataFrame):
     ax.set_xticks(unique_users)
     ax.legend(frameon=True, fontsize=9)
 
-    # 2. Decision Time vs Users
+    # 2.decision time vs users
     ax = axes[1]
     for pol in policies:
         sub = df_eval[df_eval["policy"] == pol]
@@ -289,7 +313,7 @@ def plot_scalability_analysis(df_eval: pd.DataFrame):
     ax.set_xticks(unique_users)
     ax.legend(frameon=True, fontsize=9)
 
-    # 3. Offloading Percentage vs Users
+    # 3.offloading percentage vs users
     ax = axes[2]
     for pol in policies:
         sub = df_eval[df_eval["policy"] == pol]
@@ -311,15 +335,13 @@ def plot_scalability_analysis(df_eval: pd.DataFrame):
 
 
 def run_experiments(
-    user_counts: List[int] = [4],
+    user_counts: List[int] = [2, 4, 8],
     seeds: List[int] = [42, 43],
-    total_epochs: int = 8,
-    rollout_steps: int = 512,
+    total_epochs: int = 10,
+    rollout_steps: int = 1024,
     diffusion_timesteps: int = 4,
 ):
-    """
-    Runs multi-seed, multi-scale comparative experiments.
-    """
+
     ensure_dirs()
     all_history = []
     all_eval = []
@@ -332,10 +354,17 @@ def run_experiments(
 
         eval_env = MECEnv(n_stations=2, n_users=n_users, seed=999)
 
-        # 1. Evaluate baseline non-learning policies
-        rand_res = evaluate_policy("random", eval_env, num_episodes=5, seed=100)
-        greedy_res = evaluate_policy("greedy", eval_env, num_episodes=5, seed=100)
-        all_eval.extend([rand_res, greedy_res])
+        # Standardized evaluation parameters across all policies
+        SHARED_EVAL_SEED = 1000
+        EVAL_EPISODES = 10
+
+        # 1. Evaluate baseline non-learning policies on the shared test set
+        for seed in seeds:
+            rand_res = evaluate_policy("random", eval_env, num_episodes=EVAL_EPISODES, seed=SHARED_EVAL_SEED)
+            rand_res["seed"] = seed
+            greedy_res = evaluate_policy("greedy", eval_env, num_episodes=EVAL_EPISODES, seed=SHARED_EVAL_SEED)
+            greedy_res["seed"] = seed
+            all_eval.extend([rand_res, greedy_res])
 
         # 2. Train learning algorithms across seeds
         algos = ["ppo_baseline", "diffusion_ppo", "rl_d2_rkl", "rl_d2_fkl"]
@@ -352,45 +381,46 @@ def run_experiments(
                 )
                 all_history.extend(history)
 
-                # Standard deterministic evaluation
+                # Standard policy evaluation on the identical shared test episodes
                 eval_metrics = evaluate_policy(
                     policy_type=algo,
                     env=eval_env,
                     agent=agent,
-                    num_episodes=5,
-                    seed=200 + seed,
-                    deterministic=True,
+                    num_episodes=EVAL_EPISODES,
+                    seed=SHARED_EVAL_SEED,
+                    deterministic=False,
+                    top_p=None,
                 )
                 eval_metrics["seed"] = seed
                 all_eval.append(eval_metrics)
 
-                # Top-p sampling evaluation for diffusion policies (App. C.3)
+                # Top-p sampling evaluation for diffusion policies on the identical shared test episodes
                 if algo in ["diffusion_ppo", "rl_d2_rkl", "rl_d2_fkl"]:
                     eval_metrics_topp = evaluate_policy(
                         policy_type=algo,
                         env=eval_env,
                         agent=agent,
-                        num_episodes=5,
-                        seed=300 + seed,
+                        num_episodes=EVAL_EPISODES,
+                        seed=SHARED_EVAL_SEED,
                         deterministic=False,
-                        top_p=0.95,
+                        top_p=0.98,
                     )
                     eval_metrics_topp["seed"] = seed
                     eval_metrics_topp["policy"] = f"{algo}_topp"
                     all_eval.append(eval_metrics_topp)
 
-        # Plot for this scale
+        #plot for this scale
         df_hist_curr = pd.DataFrame([h for h in all_history if h["n_users"] == n_users])
         df_eval_curr = pd.DataFrame([e for e in all_eval if e["n_users"] == n_users])
         plot_comparison_results(df_hist_curr, df_eval_curr, n_users=n_users)
 
-    # Save complete CSV results
+    #save complete csv results
     df_all_history = pd.DataFrame(all_history)
     df_all_eval = pd.DataFrame(all_eval)
     df_all_history.to_csv("results/training_history.csv", index=False)
     df_all_eval.to_csv("results/evaluation_metrics.csv", index=False)
 
-    # Multi-scale analysis plot if applicable
+    #multi-scale analysis plot if applicable
     plot_scalability_analysis(df_all_eval)
 
     print("\nSaved full logs to results/training_history.csv and results/evaluation_metrics.csv")
@@ -401,8 +431,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MEC RL Diffusion Comprehensive Runner")
     parser.add_argument("--users", type=int, nargs="+", default=[2, 4, 8], help="List of user counts, e.g. 2 4 8")
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43], help="Random seeds")
-    parser.add_argument("--epochs", type=int, default=8, help="Training epochs per seed")
-    parser.add_argument("--rollout_steps", type=int, default=512, help="Rollout steps per epoch")
+    parser.add_argument("--epochs", type=int, default=10, help="Training epochs per seed")
+    parser.add_argument("--rollout_steps", type=int, default=1024, help="Rollout steps per epoch")
     parser.add_argument("--diff_steps", type=int, default=4, help="Diffusion steps T")
     args = parser.parse_args()
 

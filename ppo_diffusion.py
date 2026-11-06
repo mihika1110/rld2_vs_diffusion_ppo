@@ -1,10 +1,3 @@
-"""
-Discrete Diffusion PPO for Combinatorial Discrete Action Spaces.
-Implementation based on Nelson Sir's formulation:
-Treats discrete diffusion generation as an augmented inner Markov process and optimizes
-PPO using the likelihood ratio of the complete sampled denoising trajectory.
-"""
-
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 import torch
@@ -18,10 +11,6 @@ from diffusion import CategoricalDiffusion
 
 
 class DiscreteDiffusionPPOAgent:
-    """
-    Discrete Diffusion PPO agent (Nelson Sir's Formulation).
-    Applies PPO over the sampled denoising trajectory tau^d = (x_T, ..., x_0).
-    """
 
     def __init__(
         self,
@@ -32,7 +21,7 @@ class DiscreteDiffusionPPOAgent:
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         clip_coef: float = 0.2,
-        ent_coef: float = 0.005,
+        ent_coef: float = 0.01,  # Table 4 of Ma et al. (2026) specifies 0.01
         max_grad_norm: float = 0.5,
         hidden_dim: int = 128,
         device: str = "cpu",
@@ -73,9 +62,7 @@ class DiscreteDiffusionPPOAgent:
         deterministic: bool = False,
         top_p: Optional[float] = None,
     ) -> Tuple[np.ndarray, float, float]:
-        """
-        Samples an action using the reverse discrete diffusion trajectory with optional Top-p.
-        """
+
         self.actor.eval()
         with torch.no_grad():
             obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -94,18 +81,13 @@ class DiscreteDiffusionPPOAgent:
         num_epochs: int = 4,
         batch_size: int = 64,
     ) -> Dict[str, float]:
-        """
-        Collects on-policy diffusion rollouts and performs trajectory PPO updates.
-        """
+
         obs_buf = []
         action_buf = []
         old_traj_lp_buf = []
         reward_buf = []
         done_buf = []
         value_buf = []
-
-        # Store trajectory tensors: for each step k, store (x_k, x_{prev}, k)
-        # We store list of trajectories
         trajectories_buf = []
 
         cost_metrics = []
@@ -115,7 +97,7 @@ class DiscreteDiffusionPPOAgent:
 
         obs, _ = self.env.reset()
 
-        # Step 1: Collect rollouts
+        #step 1: Collect rollouts
         self.actor.eval()
         self.critic.eval()
         with torch.no_grad():
@@ -138,7 +120,7 @@ class DiscreteDiffusionPPOAgent:
                 done_buf.append(done)
                 value_buf.append(value.item())
 
-                # Store trajectory items on CPU/tensors
+                #store trajectory items on CPU/tensors
                 trajectories_buf.append(
                     [(x_k.squeeze(0).cpu(), x_prev.squeeze(0).cpu(), k.squeeze(0).cpu()) for x_k, x_prev, k in traj]
                 )
@@ -152,11 +134,11 @@ class DiscreteDiffusionPPOAgent:
                 if done:
                     obs, _ = self.env.reset()
 
-            # Bootstrap last value
+            #bootstrap last value
             last_obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
             last_value = self.critic(last_obs_t).item()
 
-        # Step 2: Compute GAE and returns
+        #step 2:compute gae and returns
         values = np.array(value_buf + [last_value], dtype=np.float32)
         rewards = np.array(reward_buf, dtype=np.float32)
         dones = np.array(done_buf, dtype=np.float32)
@@ -177,11 +159,9 @@ class DiscreteDiffusionPPOAgent:
         b_advantages = torch.as_tensor(advantages, dtype=torch.float32, device=self.device)
         b_returns = torch.as_tensor(returns, dtype=torch.float32, device=self.device)
 
-        # Normalize advantages
+        #normalize advantages
         b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-        # Pre-stack trajectory tensors for efficient batched mini-batch indexing
-        # For each diffusion step k in [0..T-1]
         T = self.num_timesteps
         stacked_xk = []
         stacked_xprev = []
@@ -194,7 +174,7 @@ class DiscreteDiffusionPPOAgent:
             stacked_xprev.append(x_prev_step)
             stacked_k.append(k_step)
 
-        # Step 3: Trajectory PPO Optimization Epochs
+        #step 3:trajectory ppo optimization epochs
         self.actor.train()
         self.critic.train()
 
@@ -216,7 +196,7 @@ class DiscreteDiffusionPPOAgent:
                 mb_adv = b_advantages[mb_idx]
                 mb_ret = b_returns[mb_idx]
 
-                # Reconstruct mini-batch trajectory structure
+                #reconstruct mini-batch trajectory structure
                 mb_traj = []
                 for step_idx in range(T):
                     mb_traj.append((
@@ -225,28 +205,28 @@ class DiscreteDiffusionPPOAgent:
                         stacked_k[step_idx][mb_idx],
                     ))
 
-                # Re-evaluate trajectory log probability under theta
+                #re-evaluate trajectory log probability under theta
                 new_traj_lp, mean_ent = self.diffusion.evaluate_trajectory_log_prob(
                     self.actor, mb_obs, mb_traj
                 )
 
-                # Denoising trajectory likelihood ratio rho_t(theta) (Eq. 28)
+                #denoising trajectory likelihood ratio rho_t(theta) (Eq. 28)
                 log_ratio = new_traj_lp - mb_old_lp
                 ratio = torch.exp(log_ratio)
 
                 with torch.no_grad():
                     approx_kl = ((ratio - 1.0) - log_ratio).mean()
 
-                # Clipped actor objective (Eq. 33)
+                #clipped actor objective (Eq. 33)
                 surr1 = ratio * mb_adv
                 surr2 = torch.clamp(ratio, 1.0 - self.clip_coef, 1.0 + self.clip_coef) * mb_adv
                 actor_loss = -torch.min(surr1, surr2).mean() - self.ent_coef * mean_ent
 
-                # Critic objective (Eq. 35)
+                #critic objective (Eq. 35)
                 new_val = self.critic(mb_obs)
                 critic_loss = 0.5 * F.mse_loss(new_val, mb_ret)
 
-                # Optimizations
+                #optimizations
                 self.actor_optimizer.zero_grad()
                 actor_loss.backward()
                 nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)

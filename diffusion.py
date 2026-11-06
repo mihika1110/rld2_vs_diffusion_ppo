@@ -1,14 +1,3 @@
-"""
-Discrete Diffusion processes, trajectory handling, and PMD objectives.
-Supports:
-1. Categorical discrete forward transition schedules and noising q(x_k | x_0).
-2. Reverse denoising trajectory generation with optional Top-p (nucleus) sampling (App. C.3).
-3. Trajectory log-probability calculation for Discrete Diffusion PPO (Nelson Sir's Formulation).
-4. Single-step ratio and analytical Reverse-KL calculation for RL-D^2 RKL (Ma et al. 2026).
-5. Weighted ELBO calculation for RL-D^2 Forward-KL (FKL) (Ma et al. 2026).
-6. Automatic Temperature Tuning via dual hard-KL constraints (Ma et al. 2026 App. C.2).
-"""
-
 from typing import Tuple, List, Dict, Any, Optional
 import math
 import numpy as np
@@ -18,42 +7,40 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical, kl_divergence
 
-
+#diffusion works by corrupting the action and then learning to reverse the corruption
 def top_p_filter(logits: torch.Tensor, p: float = 0.98) -> torch.Tensor:
-    """
-    Nucleus (Top-p) filtering for categorical logits.
-    Retains only the smallest set of actions whose cumulative probability exceeds p.
-    """
     if p >= 1.0 or p <= 0.0:
         return logits
 
-    # Sort logits descending
+    #sort logits descending
     sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
     sorted_probs = F.softmax(sorted_logits, dim=-1)
-    cum_probs = torch.cumsum(sorted_probs, dim=-1)
+    cum_probs=torch.cumsum(sorted_probs, dim=-1)
 
-    # Mask tokens with cumulative probability > p (except always keep at least the first/highest token)
-    sorted_mask = cum_probs - sorted_probs > p
+    #mask tokens with cumulative probability > p (except always keep at least the first/highest token)
+    sorted_mask=cum_probs-sorted_probs > p
 
-    # Set masked logits to -infinity
+    #set masked logits to -infinity
     sorted_logits = sorted_logits.masked_fill(sorted_mask, -float("inf"))
 
-    # Scatter back to original indices
+    #scatter back to original indices
     filtered_logits = torch.empty_like(logits).scatter_(-1, sorted_indices, sorted_logits)
     return filtered_logits
 
-
+#adjusts temperature and controls the distribution of probabilities of outcomes
 class TemperatureTuner:
-    """
-    Automatic Temperature Tuning via Hard KL Divergence Constraints (App. C.2 of Ma et al. 2026).
-    Enforces constraint: d_KL(pi, pi_old) <= eps_kl.
-    Solves Lagrangian dual:
-        min_lambda g(lambda) = lambda * eps_kl + lambda * log(1/B * sum exp(A_i / lambda))
-    """
-
-    def __init__(self, init_temp: float = 0.1, target_kl: float = 0.05, lr: float = 1e-2):
+    def __init__(
+        self,
+        init_temp: float = 0.2,
+        target_kl: float = 0.5,
+        lr: float = 1e-2,
+        min_temp: float = 0.01,
+        max_temp: float = 1.0,
+    ):
         self.target_kl = target_kl
-        # Parameterize as log_temp to guarantee lambda > 0
+        self.min_temp = min_temp
+        self.max_temp = max_temp
+        #parameterize as log_temp to guarantee lambda>0
         self.log_temp = nn.Parameter(torch.tensor(math.log(max(1e-4, init_temp)), dtype=torch.float32))
         self.optimizer = optim.Adam([self.log_temp], lr=lr)
 
@@ -65,30 +52,30 @@ class TemperatureTuner:
         return torch.exp(self.log_temp)
 
     def update(self, advantages: torch.Tensor) -> float:
-        """
-        Updates temperature lambda by minimizing dual objective g(lambda).
-        advantages: (B,) 1D tensor
-        """
         self.optimizer.zero_grad()
         temp = torch.exp(self.log_temp)  # lambda > 0
 
-        # Stabilized logsumexp: lambda * (logsumexp(A / lambda) - log(B))
-        batch_size = advantages.shape[0]
-        scaled_adv = advantages.detach() / temp
+        # standardize advantages across the batch
+        adv_mean = advantages.mean()
+        adv_std = advantages.std() + 1e-8
+        norm_adv = (advantages - adv_mean) / adv_std
+
+        #stabilized logsumexp: lambda * (logsumexp(norm_adv / lambda) - log(B))
+        batch_size = norm_adv.shape[0]
+        scaled_adv = norm_adv.detach() / temp
         log_z = torch.logsumexp(scaled_adv, dim=0) - math.log(batch_size)
 
         dual_loss = temp * self.target_kl + temp * log_z
         dual_loss.backward()
         self.optimizer.step()
 
+        # clamp temperature to configured safe range [min_temp, max_temp]
+        with torch.no_grad():
+            self.log_temp.clamp_(math.log(self.min_temp), math.log(self.max_temp))
+
         return float(temp.item())
 
-
 class CategoricalDiffusion:
-    """
-    Discrete diffusion process manager for combinatorial action spaces.
-    """
-
     def __init__(
         self,
         n_users: int,
@@ -103,16 +90,15 @@ class CategoricalDiffusion:
         self.K = n_actions
         self.M = n_users
 
-        # Linear beta schedule for forward process: Q_k = (1 - beta_k) I + beta_k 1 pi^T
+        #linear beta schedule for forward process: Q_k = (1 - beta_k) I + beta_k 1 π^T
+        # where π = [1/K, ..., 1/K] is the uniform categorical distribution (Nelson 2026, Eq. 10-11)
         self.betas = np.linspace(beta_min, beta_max, num_timesteps, dtype=np.float32)
-        # Cumulative alphas: alpha_bar_k = prod_{j=1}^k (1 - beta_j)
+        #cumulative alphas: alpha_bar_k = prod_{j=1}^k (1 - beta_j)
         alphas = 1.0 - self.betas
         self.alphas_cumprod = np.cumprod(alphas)
 
     def sample_prior(self, batch_size: int, device: torch.device) -> torch.Tensor:
-        """
-        Sample initial noise state x_T from uniform categorical distribution.
-        """
+        """Eq. 15: x_T ~ Cat(1/K, ..., 1/K) - uniform categorical initialization"""
         return torch.randint(
             low=0,
             high=self.n_actions,
@@ -122,9 +108,10 @@ class CategoricalDiffusion:
         )
 
     def q_sample(self, x_0: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
-        """
-        Forward process sampling: adds noise to clean action x_0 at diffusion step k.
-        With probability alpha_bar_k, keep x_0; with probability 1 - alpha_bar_k, sample uniform action.
+        """Eq. 13: Forward process q(x_k | x_{k-1}) with uniform categorical mixing.
+
+        Keep with prob alpha_bar, else sample uniform from {0, ..., K-1}.
+        Unlike Ma 2026, NO mask token - noise is uniform over actions.
         """
         batch_size = x_0.shape[0]
         device = x_0.device
@@ -132,7 +119,9 @@ class CategoricalDiffusion:
         k_cpu = k.cpu().numpy() - 1  # 0-indexed
         alpha_bars = torch.as_tensor(self.alphas_cumprod[k_cpu], dtype=torch.float32, device=device).unsqueeze(1)
 
-        # Mask whether to retain or corrupt
+        # Forward process with uniform categorical mixing (Nelson 2026)
+        # Q_k(j, l) = 1-β_k + β_k/K if j=l, β_k/K if j≠l
+        # Implementation: keep with prob alpha_bar, else uniform random
         keep_mask = torch.rand((batch_size, self.n_users), device=device) < alpha_bars
         noise = torch.randint(0, self.n_actions, size=(batch_size, self.n_users), device=device)
 
@@ -146,10 +135,6 @@ class CategoricalDiffusion:
         deterministic: bool = False,
         top_p: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """
-        Samples a complete reverse denoising trajectory:
-        x_T -> x_{T-1} -> ... -> x_0 = a_t
-        """
         batch_size = obs.shape[0]
         device = obs.device
 
@@ -169,6 +154,8 @@ class CategoricalDiffusion:
 
             dist = Categorical(logits=logits)
 
+            # Nelson 2026 reverse: always sample from distribution, no mask logic
+            # If deterministic and k == 1: take argmax, else sample
             if deterministic and k == 1:
                 x_prev = torch.argmax(logits, dim=-1)
             else:
@@ -198,9 +185,6 @@ class CategoricalDiffusion:
         obs: torch.Tensor,
         trajectory: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Evaluates log-probability of stored trajectory under denoiser parameters theta.
-        """
         batch_size = obs.shape[0]
         device = obs.device
         total_log_prob = torch.zeros(batch_size, device=device)
@@ -225,10 +209,7 @@ class CategoricalDiffusion:
         obs: torch.Tensor,
         trajectory: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Evaluates per-step single-step ratios eta_k and Reverse-KL divergences
-        for RL-D^2 with RKL (Ma et al. 2026).
-        """
+
         batch_size = obs.shape[0]
         device = obs.device
         ratios_list = []
@@ -246,11 +227,11 @@ class CategoricalDiffusion:
 
             curr_lp = curr_dist.log_prob(x_prev).sum(dim=-1)
 
-            # Single-step importance ratio
+            #single-step importance ratio (Eq. in Ma et al. 2026 Sec. 4.1)
             step_ratio = torch.exp(curr_lp - old_lp)
             ratios_list.append(step_ratio)
 
-            # Analytical Reverse KL divergence across users
+            #analytical Reverse KL divergence across users
             step_kl = kl_divergence(curr_dist, old_dist).sum(dim=-1)
             kls_list.append(step_kl)
 
@@ -268,33 +249,39 @@ class CategoricalDiffusion:
         obs: torch.Tensor,
         clean_actions: torch.Tensor,
         advantages: torch.Tensor,
-        temperature: float = 0.1,
+        temperature: float = 0.5,
+        max_weight_factor: float = 4.0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Evaluates Forward-KL (FKL) weighted ELBO loss (Eq. FKL Loss in Ma et al. 2026):
-            L_FKL = - sum_{i} w_i * L_ELBO(a_0^i, s; theta)
-        where weights w_i = softmax(A(s, a_0^i) / lambda).
-        """
+
         batch_size = obs.shape[0]
         device = obs.device
 
-        # Softmax weights based on advantages
-        weights = F.softmax(advantages / max(1e-4, temperature), dim=0).detach()  # (B,)
+        # Standardize advantages across the batch
+        adv_mean = advantages.mean()
+        adv_std = advantages.std() + 1e-8
+        norm_adv = (advantages - adv_mean) / adv_std
 
-        # Sample random diffusion timestep k in {1, ..., T} for each batch item
+        # Exponential weights based on standardized advantages and temperature (Ma et al. 2026 FKL Loss Eq.)
+        temp = max(1e-4, temperature)
+        weights = torch.exp(norm_adv / temp).detach()  # (B,)
+
+        # Normalize weights
+        weights = weights / weights.sum()
+
+        #sample random diffusion timestep k in {1, ..., T} for each batch item
         k = torch.randint(1, self.num_timesteps + 1, size=(batch_size,), device=device)
 
-        # Corrupt clean action using forward process q(x_k | x_0)
+        #corrupt clean action using forward process q(x_k | x_0)
         x_k = self.q_sample(clean_actions, k)
 
-        # Predict clean/reverse logits from noised action
+        #predict clean/reverse logits from noised action
         logits = denoiser(obs, x_k, k)  # (B, M, K)
         dist = Categorical(logits=logits)
 
-        # Reconstruction log likelihood for clean actions
+        #reconstruction log likelihood for clean actions
         recon_log_prob = dist.log_prob(clean_actions).sum(dim=-1)  # (B,)
 
-        # Weighted ELBO loss
+        #weighted ELBO loss
         weighted_loss = -torch.sum(weights * recon_log_prob)
         mean_entropy = dist.entropy().sum(dim=-1).mean()
 

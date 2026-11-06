@@ -1,11 +1,3 @@
-"""
-RL-D^2 with Forward-KL (FKL) Objective for Combinatorial Discrete Action Spaces.
-Implementation based on Ma et al. (2026):
-Minimizes forward KL divergence to the Policy Mirror Descent (PMD) target distribution
-via advantage-weighted ELBO reconstruction loss:
-    L_FKL(theta) = - E [ sum_{a_0} softmax(A(s, a_0) / lambda) * L_ELBO(a_0, s; theta) ]
-"""
-
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 import torch
@@ -19,9 +11,6 @@ from diffusion import CategoricalDiffusion, TemperatureTuner
 
 
 class RLD2FKLAgent:
-    """
-    RL-D^2 agent with Forward-KL (FKL) weighted ELBO objective (Ma et al. 2026).
-    """
 
     def __init__(
         self,
@@ -31,12 +20,17 @@ class RLD2FKLAgent:
         critic_lr: float = 1e-3,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
-        fkl_lambda: float = 0.1,  # initial PMD temperature lambda
-        auto_tune_temp: bool = True,  # Appendix C.2
-        target_kl: float = 0.05,
-        ent_coef: float = 0.005,
+        fkl_lambda: float = 0.2,  # initial PMD temperature lambda (Ma et al. Fig. 13)
+        auto_tune_temp: bool = True,  # Appendix C.2 (learning temperature)
+        target_kl: float = 0.5,
+        temp_lr: float = 1e-2,
+        min_temp: float = 0.01,
+        max_temp: float = 1.0,  # Prevents advantage weighting saturation at high temperatures
+        ent_coef: float = 0.01,  # Table 4 of Ma et al. (2026) specifies 0.01
         max_grad_norm: float = 0.5,
         hidden_dim: int = 128,
+        replay_buffer_size: int = 512,  # 5% of total samples (512 samples for 10 epochs * 1024 rollout steps)
+        replay_ratio: int = 3,  # maximum multiplier of rollout steps to sample from replay buffer
         device: str = "cpu",
     ):
         self.env = env
@@ -48,6 +42,14 @@ class RLD2FKLAgent:
         self.auto_tune_temp = auto_tune_temp
         self.ent_coef = ent_coef
         self.max_grad_norm = max_grad_norm
+        self.replay_buffer_size = replay_buffer_size
+        self.replay_ratio = replay_ratio
+
+        # Historical replay buffers (Ma et al. Table 3 & Section 2)
+        self.replay_obs: List[np.ndarray] = []
+        self.replay_actions: List[np.ndarray] = []
+        self.replay_advantages: List[float] = []
+        self.replay_returns: List[float] = []
 
         self.diffusion = CategoricalDiffusion(
             n_users=env.n_users,
@@ -56,7 +58,13 @@ class RLD2FKLAgent:
         )
 
         if self.auto_tune_temp:
-            self.temp_tuner = TemperatureTuner(init_temp=fkl_lambda, target_kl=target_kl, lr=1e-2)
+            self.temp_tuner = TemperatureTuner(
+                init_temp=fkl_lambda,
+                target_kl=target_kl,
+                lr=temp_lr,
+                min_temp=min_temp,
+                max_temp=max_temp,
+            )
         else:
             self.temp_tuner = None
 
@@ -85,7 +93,7 @@ class RLD2FKLAgent:
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=critic_lr, eps=1e-5)
 
     def update_old_actor(self) -> None:
-        """Sync old actor with current actor weights."""
+        #sync old actor with current actor weights
         self.old_actor.load_state_dict(self.actor.state_dict())
         self.old_actor.eval()
 
@@ -95,9 +103,8 @@ class RLD2FKLAgent:
         deterministic: bool = False,
         top_p: Optional[float] = None,
     ) -> Tuple[np.ndarray, float, float]:
-        """
-        Samples an action using the learned reverse discrete diffusion process with optional Top-p.
-        """
+
+        #samples an action using the learned reverse discrete diffusion process with optional Top-p.
         self.actor.eval()
         with torch.no_grad():
             obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -116,9 +123,8 @@ class RLD2FKLAgent:
         num_epochs: int = 4,
         batch_size: int = 64,
     ) -> Dict[str, float]:
-        """
-        Collects rollouts and optimizes the Forward-KL (FKL) weighted ELBO objective.
-        """
+        
+        #collects rollouts and optimizes the Forward-KL (FKL) weighted ELBO objective.
         self.update_old_actor()
 
         obs_buf = []
@@ -134,7 +140,7 @@ class RLD2FKLAgent:
 
         obs, _ = self.env.reset()
 
-        # Step 1: Collect rollouts using old policy
+        #step 1:collect rollouts using old policy
         self.actor.eval()
         self.critic.eval()
         with torch.no_grad():
@@ -166,7 +172,7 @@ class RLD2FKLAgent:
             last_obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
             last_value = self.critic(last_obs_t).item()
 
-        # Step 2: GAE Advantage Estimation
+        #step 2:gae advantage estimation
         values = np.array(value_buf + [last_value], dtype=np.float32)
         rewards = np.array(reward_buf, dtype=np.float32)
         dones = np.array(done_buf, dtype=np.float32)
@@ -181,18 +187,34 @@ class RLD2FKLAgent:
 
         returns = advantages + values[:-1]
 
-        b_obs = torch.as_tensor(np.array(obs_buf), dtype=torch.float32, device=self.device)
-        b_clean_actions = torch.as_tensor(np.array(action_buf), dtype=torch.long, device=self.device)
-        b_advantages = torch.as_tensor(advantages, dtype=torch.float32, device=self.device)
-        b_returns = torch.as_tensor(returns, dtype=torch.float32, device=self.device)
+        # Add current rollouts to historical replay buffer (Ma et al. Table 3 & Appendix B.1)
+        for i in range(rollout_steps):
+            self.replay_obs.append(obs_buf[i])
+            self.replay_actions.append(action_buf[i])
+            self.replay_advantages.append(float(advantages[i]))
+            self.replay_returns.append(float(returns[i]))
 
-        # Appendix C.2: Auto-tune temperature parameter lambda
-        if self.temp_tuner is not None:
-            curr_lambda = self.temp_tuner.update(b_advantages)
-        else:
-            curr_lambda = self.fkl_lambda
+        # Trim replay buffer if it exceeds capacity
+        if len(self.replay_obs) > self.replay_buffer_size:
+            excess = len(self.replay_obs) - self.replay_buffer_size
+            self.replay_obs = self.replay_obs[excess:]
+            self.replay_actions = self.replay_actions[excess:]
+            self.replay_advantages = self.replay_advantages[excess:]
+            self.replay_returns = self.replay_returns[excess:]
 
-        # Step 3: FKL Policy Improvement via Weighted ELBO
+        # Sample combined training pool: most recent diverse transitions (up to replay_ratio * rollout steps)
+        train_pool_len = min(len(self.replay_obs), rollout_steps * self.replay_ratio)
+        train_obs = np.array(self.replay_obs[-train_pool_len:])
+        train_acts = np.array(self.replay_actions[-train_pool_len:])
+        train_adv = np.array(self.replay_advantages[-train_pool_len:], dtype=np.float32)
+        train_ret = np.array(self.replay_returns[-train_pool_len:], dtype=np.float32)
+
+        b_obs = torch.as_tensor(train_obs, dtype=torch.float32, device=self.device)
+        b_clean_actions = torch.as_tensor(train_acts, dtype=torch.long, device=self.device)
+        b_advantages = torch.as_tensor(train_adv, dtype=torch.float32, device=self.device)
+        b_returns = torch.as_tensor(train_ret, dtype=torch.float32, device=self.device)
+
+        #step 3: fkl policy improvement via weighted elbo
         self.actor.train()
         self.critic.train()
 
@@ -201,10 +223,12 @@ class RLD2FKLAgent:
         total_entropy = 0.0
         n_updates = 0
 
-        indices = np.arange(rollout_steps)
+        indices = np.arange(train_pool_len)
+        curr_lambda = self.fkl_lambda
+
         for _ in range(num_epochs):
             np.random.shuffle(indices)
-            for start in range(0, rollout_steps, batch_size):
+            for start in range(0, train_pool_len, batch_size):
                 end = start + batch_size
                 mb_idx = indices[start:end]
 
@@ -213,7 +237,11 @@ class RLD2FKLAgent:
                 mb_adv = b_advantages[mb_idx]
                 mb_ret = b_returns[mb_idx]
 
-                # FKL Weighted ELBO Loss (Eq. FKL Loss in Ma et al. 2026)
+                # Dynamically update temperature per mini-batch (Appendix C.2)
+                if self.temp_tuner is not None:
+                    curr_lambda = self.temp_tuner.update(mb_adv)
+
+                #fkl weighted elbo loss with bounded weights
                 weighted_elbo_loss, mean_ent = self.diffusion.evaluate_fkl_weighted_elbo(
                     denoiser=self.actor,
                     obs=mb_obs,
@@ -224,11 +252,11 @@ class RLD2FKLAgent:
 
                 actor_loss = weighted_elbo_loss - self.ent_coef * mean_ent
 
-                # Critic Loss
-                new_val = self.critic(mb_obs)
-                critic_loss = 0.5 * F.mse_loss(new_val, mb_ret)
+                #critic loss
+                new_val=self.critic(mb_obs)
+                critic_loss=0.5*F.mse_loss(new_val,mb_ret)
 
-                # Optimizations
+                #optimizations
                 self.actor_optimizer.zero_grad()
                 actor_loss.backward()
                 nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)

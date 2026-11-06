@@ -1,0 +1,131 @@
+C:\Users\HP\OneDrive\Desktop\BTP\agent\agent>python evaluate_checkpoints.py
+================================================================================
+STANDARDIZED CHECKPOINT EVALUATION BENCHMARK
+Shared Evaluation Seed: 1000 | Test Episodes per Policy: 10
+All policies are evaluated on the EXACT SAME test environments and task arrivals.
+================================================================================
+
+
+--- Evaluating Scale: M = 2 Users (Action Space: 3^2 = 9) ---
+Evaluated ppo_baseline   | Users=2 | Seed=42 (from Epoch 6): Mean Cost = 1.783
+Evaluated diffusion_ppo  | Users=2 | Seed=42 (from Epoch 10): Mean Cost = 1.908
+Evaluated rl_d2_rkl      | Users=2 | Seed=42 (from Epoch 10): Mean Cost = 1.835
+Evaluated rl_d2_fkl      | Users=2 | Seed=42 (from Epoch 2): Mean Cost = 1.810
+Evaluated ppo_baseline   | Users=2 | Seed=43 (from Epoch 5): Mean Cost = 1.867
+Evaluated diffusion_ppo  | Users=2 | Seed=43 (from Epoch 7): Mean Cost = 1.869
+Evaluated rl_d2_rkl      | Users=2 | Seed=43 (from Epoch 4): Mean Cost = 1.962
+Evaluated rl_d2_fkl      | Users=2 | Seed=43 (from Epoch 5): Mean Cost = 1.831
+Saved comparison figure to results/comparison_users_2.png
+
+--- Evaluating Scale: M = 4 Users (Action Space: 3^4 = 81) ---
+Evaluated ppo_baseline   | Users=4 | Seed=42 (from Epoch 6): Mean Cost = 2.594
+Evaluated diffusion_ppo  | Users=4 | Seed=42 (from Epoch 10): Mean Cost = 2.488
+Saved comparison figure to results/comparison_users_2.png
+
+--- Evaluating Scale: M = 4 Users (Action Space: 3^4 = 81) ---
+Evaluated ppo_baseline   | Users=4 | Seed=42 (from Epoch 6): Mean Cost = 2.594
+Evaluated diffusion_ppo  | Users=4 | Seed=42 (from Epoch 10): Mean Cost = 2.488
+Evaluated diffusion_ppo  | Users=4 | Seed=42 (from Epoch 10): Mean Cost = 2.488
+Evaluated rl_d2_rkl      | Users=4 | Seed=42 (from Epoch 4): Mean Cost = 2.497
+Evaluated rl_d2_fkl      | Users=4 | Seed=42 (from Epoch 2): Mean Cost = 2.921
+Evaluated ppo_baseline   | Users=4 | Seed=43 (from Epoch 8): Mean Cost = 2.549
+Evaluated diffusion_ppo  | Users=4 | Seed=43 (from Epoch 10): Mean Cost = 2.557
+Evaluated rl_d2_rkl      | Users=4 | Seed=43 (from Epoch 10): Mean Cost = 2.402
+Evaluated rl_d2_fkl      | Users=4 | Seed=43 (from Epoch 3): Mean Cost = 2.546
+Saved comparison figure to results/comparison_users_4.png
+
+--- Evaluating Scale: M = 8 Users (Action Space: 3^8 = 6561) ---
+Evaluated ppo_baseline   | Users=8 | Seed=42 (from Epoch 8): Mean Cost = 2.680
+Evaluated diffusion_ppo  | Users=8 | Seed=42 (from Epoch 8): Mean Cost = 2.648
+Evaluated rl_d2_rkl      | Users=8 | Seed=42 (from Epoch 3): Mean Cost = 2.712
+Evaluated rl_d2_fkl      | Users=8 | Seed=42 (from Epoch 8): Mean Cost = 2.080
+Evaluated ppo_baseline   | Users=8 | Seed=43 (from Epoch 3): Mean Cost = 2.700
+Evaluated diffusion_ppo  | Users=8 | Seed=43 (from Epoch 4): Mean Cost = 2.721
+Evaluated rl_d2_rkl      | Users=8 | Seed=43 (from Epoch 8): Mean Cost = 2.736
+Evaluated rl_d2_fkl      | Users=8 | Seed=43 (from Epoch 7): Mean Cost = 2.644
+Saved comparison figure to results/comparison_users_8.png
+
+Saved updated evaluation metrics to results/evaluation_metrics.csv
+Saved scalability analysis figure to results/scalability_analysis.png
+
+==========================================================================================
+STANDARDIZED MEC POLICY EVALUATION BENCHMARK SUMMARY (FAIR TEST SET)
+==========================================================================================
+
+==========================================================================================
+MEC POLICY EVALUATION BENCHMARK SUMMARY
+==========================================================================================
+            policy  n_users  mean_return  mean_cost  mean_latency_s  mean_energy_j  mean_offload_pct  decision_time_ms
+            random        2   -41.495424   2.085197        2.287539       1.916519         65.552764          
+0.021492
+            greedy        2   -25.149443   1.263791        1.366943       1.593144         47.537688          
+0.007180
+            random        2   -42.746514   2.148066        2.441111       1.899326         67.160804          
+0.021294
+            greedy        2   -25.149443   1.263791        1.366943       1.593144         47.537688          
+0.006436
+      ppo_baseline        2   -35.489884   1.783411        1.713604       1.905238         52.085427          
+1.511858
+     diffusion_ppo        2   -37.978934   1.908489        1.900290       1.913800         59.045226         19.749284
+diffusion_ppo_topp        2   -40.118442   2.016002        2.128834       1.914488         62.311558         17.188341
+         rl_d2_rkl        2   -36.509454   1.834646        1.761848       1.938967         54.723618         17.192217
+    rl_d2_rkl_topp        2   -36.303238   1.824283        1.758815       1.924334         54.170854         25.451617
+         rl_d2_fkl        2   -36.017738   1.809937        1.759400       1.905302         48.969849         25.985098
+    rl_d2_fkl_topp        2   -38.546352   1.937003        2.006943       1.887974         51.959799         19.569012
+      ppo_baseline        2   -37.152186   1.866944        1.877873       1.895116         57.562814          
+1.597176
+     diffusion_ppo        2   -37.200022   1.869348        1.865255       1.910232         58.291457         15.363876
+diffusion_ppo_topp        2   -37.094871   1.864064        1.843855       1.901039         58.417085         17.008557
+         rl_d2_rkl        2   -39.036104   1.961613        2.091887       1.903820         61.934673         26.098132
+    rl_d2_rkl_topp        2   -38.411834   1.930243        1.980084       1.906281         61.331658         27.042731
+         rl_d2_fkl        2   -36.445956   1.831455        1.380432       2.269904         19.798995         24.632951
+    rl_d2_fkl_topp        2   -39.627596   1.991336        1.497894       2.553251         16.758794         27.680898
+            random        4   -52.758465   2.651179        3.469039       1.922381         67.449749          
+0.048338
+            greedy        4   -28.740976   1.444270        1.460603       1.807815         31.306533          
+0.014286
+            random        4   -52.097753   2.617978        3.394461       1.890342         66.394472          
+0.046726
+            greedy        4   -28.740976   1.444270        1.460603       1.807815         31.306533          
+0.014679
+      ppo_baseline        4   -51.615973   2.593767        3.382812       1.880347         66.344221          
+2.238881
+     diffusion_ppo        4   -49.503875   2.487632        3.165616       1.890207         61.419598         24.892864
+diffusion_ppo_topp        4   -50.485570   2.536963        3.247246       1.897063         63.103015         28.402959
+         rl_d2_rkl        4   -49.687650   2.496867        3.191018       1.902867         61.633166         20.440334
+    rl_d2_rkl_topp        4   -49.713708   2.498176        3.144825       1.902619         60.979899         19.687436
+         rl_d2_fkl        4   -58.123158   2.920762        3.975954       1.891078         80.087940         24.751505
+    rl_d2_fkl_topp        4   -57.673416   2.898162        3.971745       1.901053         79.648241         30.767887
+      ppo_baseline        4   -50.720809   2.548784        3.266113       1.884306         63.907035          
+2.190035
+     diffusion_ppo        4   -50.889586   2.557266        3.279916       1.902623         64.045226         21.564090
+diffusion_ppo_topp        4   -50.528388   2.539115        3.295751       1.902372         63.856784         20.606623
+         rl_d2_rkl        4   -47.807887   2.402406        3.000799       1.905031         57.211055         24.864466
+    rl_d2_rkl_topp        4   -47.210612   2.372393        2.918083       1.910289         55.477387         20.518756
+         rl_d2_fkl        4   -50.669335   2.546198        3.295272       1.891789         65.012563         28.219746
+    rl_d2_fkl_topp        4   -49.850804   2.505066        3.214833       1.887346         63.743719         30.225407
+            random        8   -54.641211   2.745789        3.622785       1.903864         67.185930          
+0.053567
+            greedy        8   -36.834262   1.850968        1.752231       2.280000         20.835427          
+0.016418
+            random        8   -54.315258   2.729410        3.595613       1.906191         66.752513          
+0.049086
+            greedy        8   -36.834262   1.850968        1.752231       2.280000         20.835427          
+0.016991
+      ppo_baseline        8   -53.322424   2.679519        3.500133       1.896759         64.434673          
+2.523611
+     diffusion_ppo        8   -52.690331   2.647755        3.425223       1.907724         62.512563         25.288321
+diffusion_ppo_topp        8   -53.193343   2.673032        3.448671       1.904977         62.977387         28.622875
+         rl_d2_rkl        8   -53.977427   2.712434        3.576993       1.895254         66.262563         28.854035
+    rl_d2_rkl_topp        8   -54.145823   2.720896        3.573715       1.896315         66.193467         31.517431
+         rl_d2_fkl        8   -41.401081   2.080456        1.815585       2.387974         18.435930         31.844899
+    rl_d2_fkl_topp        8   -42.348487   2.128065        1.816011       2.482936         17.305276         34.061129
+      ppo_baseline        8   -53.722991   2.699648        3.521650       1.886797         65.345477          
+2.447135
+     diffusion_ppo        8   -54.145832   2.720896        3.572460       1.900658         66.149497         31.484531
+diffusion_ppo_topp        8   -54.191212   2.723176        3.575363       1.900902         66.256281         28.066138
+         rl_d2_rkl        8   -54.446495   2.736005        3.579480       1.906526         66.143216         17.030447
+    rl_d2_rkl_topp        8   -54.381222   2.732725        3.581934       1.909383         66.243719         17.842145
+         rl_d2_fkl        8   -52.622909   2.644367        3.422266       1.891070         62.744975         23.207594
+    rl_d2_fkl_topp        8   -52.029924   2.614569        3.376343       1.893346         61.582915         26.252866
+

@@ -1,15 +1,5 @@
-"""
-Evaluation suite for MEC policies:
-- Random policy
-- Greedy policy (instantaneous weighted cost minimization)
-- Categorical PPO baseline
-- Discrete Diffusion PPO (Nelson Sir's Formulation)
-- RL-D^2 with RKL (Ma et al. 2026)
-- RL-D^2 with FKL (Ma et al. 2026)
-With support for Top-p (nucleus) sampling (App. C.3).
-"""
-
 from typing import Dict, List, Any, Optional
+
 import time
 import numpy as np
 import torch
@@ -24,12 +14,10 @@ def evaluate_policy(
     agent: Optional[Any] = None,
     num_episodes: int = 5,
     seed: int = 100,
-    deterministic: bool = True,
+    deterministic: bool = False,
     top_p: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """
-    Evaluates a policy over multiple full episodes.
-    """
+
     returns = []
     costs = []
     times = []
@@ -58,7 +46,7 @@ def evaluate_policy(
             elif policy_type in ["diffusion_ppo", "rl_d2_rkl", "rl_d2_fkl"]:
                 if agent is None:
                     raise ValueError(f"Agent instance required for policy_type '{policy_type}'")
-                # Pass top_p if supported
+                #pass top_p if supported
                 if hasattr(agent, "select_action"):
                     import inspect
                     sig = inspect.signature(agent.select_action)
@@ -72,7 +60,7 @@ def evaluate_policy(
                 raise ValueError(f"Unknown policy_type '{policy_type}'")
             t1 = time.perf_counter()
 
-            step_latencies.append((t1 - t0) * 1000.0)  # ms
+            step_latencies.append((t1-t0) * 1000.0) #ms
 
             obs, reward, terminated, truncated, step_info = env.step(action)
             ep_return += reward
@@ -107,7 +95,6 @@ def evaluate_policy(
 
 
 def print_evaluation_summary(results: List[Dict[str, Any]]) -> pd.DataFrame:
-    """Prints a formatted evaluation table."""
     df = pd.DataFrame(results)
     cols = [
         "policy",
@@ -124,5 +111,5 @@ def print_evaluation_summary(results: List[Dict[str, Any]]) -> pd.DataFrame:
     print("MEC POLICY EVALUATION BENCHMARK SUMMARY")
     print("=" * 90)
     print(display_df.to_string(index=False))
-    print("=" * 90 + "\n")
+    print("" * 90 + "\n")
     return df

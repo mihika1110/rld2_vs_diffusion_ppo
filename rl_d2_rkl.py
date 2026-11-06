@@ -1,11 +1,3 @@
-"""
-RL-D^2 with Reverse-KL (RKL) Objective for Combinatorial Discrete Action Spaces.
-Implementation based on Ma et al. (2026):
-Treats policy improvement as a distributional matching problem to the Policy Mirror Descent (PMD)
-target distribution, utilizing tractable single-step denoising ratios in an augmented MDP,
-PPO-style clipping, and analytical Reverse-KL regularization with automatic temperature tuning (App. C.2).
-"""
-
 from typing import Dict, List, Tuple, Optional, Any
 import copy
 import numpy as np
@@ -20,9 +12,6 @@ from diffusion import CategoricalDiffusion, TemperatureTuner
 
 
 class RLD2RKLAgent:
-    """
-    RL-D^2 agent with Reverse-KL (RKL) objective and automatic temperature tuning (Ma et al. 2026).
-    """
 
     def __init__(
         self,
@@ -36,7 +25,10 @@ class RLD2RKLAgent:
         rkl_lambda: float = 0.05,  # initial PMD Reverse-KL temperature
         auto_tune_temp: bool = True,  # Appendix C.2
         target_kl: float = 0.05,
-        ent_coef: float = 0.005,
+        temp_lr: float = 1e-2,
+        min_temp: float = 0.05,
+        max_temp: float = 5.0,
+        ent_coef: float = 0.01,  # Table 4 of Ma et al. (2026) specifies 0.01
         max_grad_norm: float = 0.5,
         hidden_dim: int = 128,
         device: str = "cpu",
@@ -59,7 +51,13 @@ class RLD2RKLAgent:
         )
 
         if self.auto_tune_temp:
-            self.temp_tuner = TemperatureTuner(init_temp=rkl_lambda, target_kl=target_kl, lr=1e-2)
+            self.temp_tuner = TemperatureTuner(
+                init_temp=rkl_lambda,
+                target_kl=target_kl,
+                lr=temp_lr,
+                min_temp=min_temp,
+                max_temp=max_temp,
+            )
         else:
             self.temp_tuner = None
 
@@ -70,7 +68,6 @@ class RLD2RKLAgent:
             hidden_dim=hidden_dim,
         ).to(self.device)
 
-        # Frozen reference network
         self.old_actor = DiffusionDenoiser(
             obs_dim=env.observation_dim,
             n_users=env.n_users,
@@ -89,7 +86,7 @@ class RLD2RKLAgent:
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=critic_lr, eps=1e-5)
 
     def update_old_actor(self) -> None:
-        """Sync old actor with current actor weights."""
+        #sync old actor with current actor weights
         self.old_actor.load_state_dict(self.actor.state_dict())
         self.old_actor.eval()
 
@@ -99,9 +96,6 @@ class RLD2RKLAgent:
         deterministic: bool = False,
         top_p: Optional[float] = None,
     ) -> Tuple[np.ndarray, float, float]:
-        """
-        Samples an action using the learned reverse discrete diffusion process with optional Top-p.
-        """
         self.actor.eval()
         with torch.no_grad():
             obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -120,9 +114,7 @@ class RLD2RKLAgent:
         num_epochs: int = 4,
         batch_size: int = 64,
     ) -> Dict[str, float]:
-        """
-        Collects on-policy rollouts and optimizes the Reverse-KL objective with single-step clipping.
-        """
+
         self.update_old_actor()
 
         obs_buf = []
@@ -139,7 +131,7 @@ class RLD2RKLAgent:
 
         obs, _ = self.env.reset()
 
-        # Step 1: On-Policy Diffusion Data Collection (Section 4.2)
+        #step 1:on-policy diffusion data collection
         self.actor.eval()
         self.critic.eval()
         with torch.no_grad():
@@ -176,7 +168,7 @@ class RLD2RKLAgent:
             last_obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
             last_value = self.critic(last_obs_t).item()
 
-        # Step 2: Compute Advantages and Returns
+        # step 2:compute advantages and returns
         values = np.array(value_buf + [last_value], dtype=np.float32)
         rewards = np.array(reward_buf, dtype=np.float32)
         dones = np.array(done_buf, dtype=np.float32)
@@ -195,16 +187,16 @@ class RLD2RKLAgent:
         b_advantages = torch.as_tensor(advantages, dtype=torch.float32, device=self.device)
         b_returns = torch.as_tensor(returns, dtype=torch.float32, device=self.device)
 
-        # Appendix C.2: Temperature auto-tuning using raw advantages
+        #appendix C.2:temperature auto-tuning using raw advantages
         if self.temp_tuner is not None:
             curr_lambda = self.temp_tuner.update(b_advantages)
         else:
             curr_lambda = self.rkl_lambda
 
-        # Normalize advantages for policy gradient
+        #normalize advantages for policy gradient
         b_adv_norm = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-        # Pre-stack trajectories
+        #pre-stack trajectories
         T = self.num_timesteps
         stacked_xk = []
         stacked_xprev = []
@@ -217,7 +209,7 @@ class RLD2RKLAgent:
             stacked_xprev.append(x_prev_step)
             stacked_k.append(k_step)
 
-        # Step 3: RKL Policy Improvement Optimization
+        #step 3:rkl policy improvement optimization
         self.actor.train()
         self.critic.train()
 
@@ -246,23 +238,23 @@ class RLD2RKLAgent:
                         stacked_k[step_idx][mb_idx],
                     ))
 
-                # Evaluate single-step ratios and analytical Reverse-KL
+                #evaluate single-step ratios and analytical reverse-kl
                 step_ratios, step_kls, mean_ent = self.diffusion.evaluate_rkl_steps(
                     self.actor, self.old_actor, mb_obs, mb_traj
                 )
 
                 adv_expanded = mb_adv.unsqueeze(1).expand_as(step_ratios)
 
-                # PPO-style single-step clipping
+                #PPO-style single-step clipping
                 surr1 = step_ratios * adv_expanded
                 surr2 = torch.clamp(step_ratios, 1.0 - self.clip_coef, 1.0 + self.clip_coef) * adv_expanded
                 clipped_pg = torch.min(surr1, surr2)
 
-                # RKL Objective with (optionally auto-tuned) PMD temperature curr_lambda
-                actor_loss = - (clipped_pg - curr_lambda * step_kls).mean() - self.ent_coef * mean_ent
+                #rkl objective with (optionally auto-tuned) pmd temperature curr_lambda
+                actor_loss = -(clipped_pg - curr_lambda * step_kls).mean() - self.ent_coef * mean_ent
 
-                # Critic loss
-                new_val = self.critic(mb_obs)
+                #critic loss
+                new_val=self.critic(mb_obs)
                 critic_loss = 0.5 * F.mse_loss(new_val, mb_ret)
 
                 # Updates

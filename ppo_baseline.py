@@ -1,9 +1,5 @@
-"""
-Independent Categorical PPO Baseline for Multi-User MEC.
-Predicts factorized independent categorical distributions for each user.
-"""
-
 from typing import Dict, List, Tuple, Optional, Any
+
 import time
 import numpy as np
 import torch
@@ -15,10 +11,8 @@ from mec_env import MECEnv
 from models import CategoricalActor, CriticNetwork
 
 
+#categorial ppo algo
 class CategoricalPPOAgent:
-    """
-    Independent Categorical PPO algorithm.
-    """
 
     def __init__(
         self,
@@ -58,10 +52,10 @@ class CategoricalPPOAgent:
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=actor_lr, eps=1e-5)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=critic_lr, eps=1e-5)
 
+
     def select_action(self, obs: np.ndarray, deterministic: bool = False) -> Tuple[np.ndarray, float, float]:
-        """
-        Samples an action for environment execution.
-        """
+        #samples an action for environment execution
+        
         self.actor.eval()
         with torch.no_grad():
             obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -80,10 +74,8 @@ class CategoricalPPOAgent:
         num_epochs: int = 4,
         batch_size: int = 64,
     ) -> Dict[str, float]:
-        """
-        Collects on-policy rollouts and performs PPO updates.
-        """
-        # Storage
+       
+        #storage
         obs_buf = []
         action_buf = []
         log_prob_buf = []
@@ -98,7 +90,7 @@ class CategoricalPPOAgent:
 
         obs, _ = self.env.reset()
 
-        # Step 1: Collect rollouts
+        #step 1:collect rollouts
         self.actor.eval()
         self.critic.eval()
         with torch.no_grad():
@@ -127,11 +119,11 @@ class CategoricalPPOAgent:
                 if done:
                     obs, _ = self.env.reset()
 
-            # Bootstrap value for final step
+            #bootstrap value for final step
             last_obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
             last_value = self.critic(last_obs_t).item()
 
-        # Step 2: Compute GAE and returns
+        #step 2:compute gae and returns
         values = np.array(value_buf + [last_value], dtype=np.float32)
         rewards = np.array(reward_buf, dtype=np.float32)
         dones = np.array(done_buf, dtype=np.float32)
@@ -146,57 +138,57 @@ class CategoricalPPOAgent:
 
         returns = advantages + values[:-1]
 
-        # Convert to tensors
+        #convert to tensors
         b_obs = torch.as_tensor(np.array(obs_buf), dtype=torch.float32, device=self.device)
         b_actions = torch.as_tensor(np.array(action_buf), dtype=torch.long, device=self.device)
         b_log_probs = torch.as_tensor(np.array(log_prob_buf), dtype=torch.float32, device=self.device)
         b_advantages = torch.as_tensor(advantages, dtype=torch.float32, device=self.device)
         b_returns = torch.as_tensor(returns, dtype=torch.float32, device=self.device)
 
-        # Normalize advantages
+        #normalize advantages
         b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
 
-        # Step 3: PPO Optimization Epochs
+        #step 3:ppo optimization epochs
         self.actor.train()
         self.critic.train()
 
-        total_actor_loss = 0.0
-        total_critic_loss = 0.0
-        total_entropy = 0.0
-        total_approx_kl = 0.0
-        n_updates = 0
+        total_actor_loss=0.0
+        total_critic_loss=0.0
+        total_entropy=0.0
+        total_approx_kl=0.0
+        n_updates=0
 
         indices = np.arange(rollout_steps)
         for _ in range(num_epochs):
             np.random.shuffle(indices)
             for start in range(0, rollout_steps, batch_size):
-                end = start + batch_size
-                mb_idx = indices[start:end]
+                end=start+batch_size
+                mb_idx=indices[start:end]
 
-                mb_obs = b_obs[mb_idx]
-                mb_acts = b_actions[mb_idx]
-                mb_old_lp = b_log_probs[mb_idx]
-                mb_adv = b_advantages[mb_idx]
-                mb_ret = b_returns[mb_idx]
+                mb_obs=b_obs[mb_idx]
+                mb_acts=b_actions[mb_idx]
+                mb_old_lp=b_log_probs[mb_idx]
+                mb_adv=b_advantages[mb_idx]
+                mb_ret=b_returns[mb_idx]
 
-                # Actor evaluation
-                new_lp, entropy = self.actor.evaluate_actions(mb_obs, mb_acts)
-                log_ratio = new_lp - mb_old_lp
-                ratio = torch.exp(log_ratio)
+                #actor evaluation [Training Mode]
+                new_lp, entropy=self.actor.evaluate_actions(mb_obs, mb_acts)
+                log_ratio=new_lp-mb_old_lp
+                ratio=torch.exp(log_ratio)
 
                 with torch.no_grad():
-                    approx_kl = ((ratio - 1.0) - log_ratio).mean()
+                    approx_kl=((ratio-1.0)-log_ratio).mean()
 
-                # Clipped surrogate objective
-                surr1 = ratio * mb_adv
-                surr2 = torch.clamp(ratio, 1.0 - self.clip_coef, 1.0 + self.clip_coef) * mb_adv
-                actor_loss = -torch.min(surr1, surr2).mean() - self.ent_coef * entropy.mean()
+                #clipped surrogate (intuitive) objective
+                surr1=ratio*mb_adv
+                surr2=torch.clamp(ratio, 1.0-self.clip_coef, 1.0+self.clip_coef) * mb_adv
+                actor_loss=-torch.min(surr1, surr2).mean()-self.ent_coef * entropy.mean()
 
-                # Critic objective
-                new_val = self.critic(mb_obs)
-                critic_loss = 0.5 * F.mse_loss(new_val, mb_ret)
+                #critic objective
+                new_val=self.critic(mb_obs)
+                critic_loss=0.5*F.mse_loss(new_val, mb_ret)
 
-                # Optimizations
+                #optimizations
                 self.actor_optimizer.zero_grad()
                 actor_loss.backward()
                 nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)

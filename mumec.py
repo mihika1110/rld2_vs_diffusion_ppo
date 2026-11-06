@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 
 FTYPE = np.float32
 
-
+#The Real-World Physics Constants
 class Globe:
     prop_speed = 3.0e8     # (propagation speed) speed of light
     carrier_freq = 3.5e9   # carrier freq (Hz)
@@ -45,10 +45,12 @@ def Remap(X, input_low, input_high, output_low, output_high):
     return ((X - input_low)*(output_high-output_low)/(input_high-input_low)) + output_low
 
 
+#unscales from 0-1 range back to physical numbers
 def DeNorm(X, output_low, output_high):
     return Remap(X, 0.0, 1.0, output_low, output_high)
 
 
+#scales huge physical numbers to 0-1 range
 def ReNorm(X, input_low, input_high):
     return Remap(X, input_low, input_high, 0.0, 1.0)
 
@@ -61,6 +63,7 @@ class World:
             N = N, # no of base stations
             M = M, # no of users
 
+            #stations placed symmetrically
             sx = [0.5+0.75*math.cos(2*math.pi*n/N) for n in range(N)],  # station position
             sy = [0.5+0.75*math.sin(2*math.pi*n/N) for n in range(N)],  # station position
 
@@ -209,26 +212,29 @@ class World:
     def ReNorm(world): return __class__.Remap(world, ReNorm)
 
 
-class UFields(IntEnum):
-    X = 0
-    Y = 1
-    C = 2
-    D = 3
-    E = 4
-    F = 5
+#user state attributes 
+class UFields(IntEnum): 
+    X = 0   #station location
+    Y = 1   #station location
+    C = 2   #Task workload (number of CPU cycles needed) (cycles/sec)
+    D = 3   #Data payload (number of bits to transmit over radio).
+    E = 4   #User maximum CPU execution rate (clock speed in cycles/sec).
+    F = 5   #User CPU availability/health factor (starts at 1.0; drops if CPU is throttled).
 
 
+#Base Station State Attributes
 class BFields(IntEnum):
-    X = 0
-    Y = 1
-    E = 2
-    V = 3
-    F = 4
+    X = 0   #Base station location
+    Y = 1   #Base station location
+    E = 2   #Server CPU execution rate (cycles/sec)
+    V = 3   #Wireless transmission bandwidth (Hertz)
+    F = 4   #Server CPU availability/health factor (starts at 1.0; drops if overloaded with tasks).
 
 
+#Cost Types
 class CFields(IntEnum):
-    Time = 0
-    Energy = 1
+    Time = 0    #Task completion delay in seconds
+    Energy = 1  #Battery energy consumed in Joules
 
 
 lenUFields = len(UFields)
@@ -236,6 +242,7 @@ lenBFields = len(BFields)
 lenCFields = len(CFields)
 
 
+#creates a blank state vector
 def Create(N, M):
     return np.hstack((
         np.zeros((M*lenUFields,), dtype=FTYPE),
@@ -243,6 +250,7 @@ def Create(N, M):
     ))
 
 
+#splits the user & the base station states
 def Split(state, N, M):
     users_end = M*lenUFields
     U = state[0:users_end].reshape(M, lenUFields)
@@ -250,6 +258,7 @@ def Split(state, N, M):
     return U, B
 
 
+#simulating how a single mobile user moves around the map and generates computation tasks over time
 def RandomTrajectory(rng, xrange, yrange, srange, crange, drange, eps_task, eps_trajectory, max_steps):
     epxy, epx, epy = rng.random(), rng.random(), rng.random()
     xe, ye = ((xrange[0] if rng.random() < epx else xrange[1]) , (rng.uniform(*yrange))) if rng.random() < epxy else ((rng.uniform(*xrange)), (yrange[0] if rng.random() < epy else yrange[1]))
